@@ -27,19 +27,17 @@ def reduce_final_kernel(
     partial_sum_ptr, final_sum_ptr, num_partial_sums,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # 计算当前线程处理的索引
+    # 只有一个线程（pid=0）来处理所有部分和
     pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    # 确保不越界
-    mask = offsets < num_partial_sums
-    # 加载部分和
-    partial_sums = tl.load(partial_sum_ptr + offsets, mask=mask, other=0.0)
-    # 计算最终和
-    final_sum = tl.sum(partial_sums)
-    
-    # 只在第一个线程存储最终结果
     if pid == 0:
+        # 使用BLOCK_SIZE来加载部分和
+        offsets = tl.arange(0, BLOCK_SIZE)
+        mask = offsets < num_partial_sums
+        # 加载部分和
+        partial_sums = tl.load(partial_sum_ptr + offsets, mask=mask, other=0.0)
+        # 计算最终和
+        final_sum = tl.sum(partial_sums)
+        # 存储最终结果
         tl.store(final_sum_ptr, final_sum)
 
 def reduce_sum_triton(x):
@@ -62,13 +60,16 @@ def reduce_sum_triton(x):
     grid1 = (num_blocks,)
     reduce_sum_kernel[grid1](x, partial_sums, n_elements, BLOCK_SIZE)
     
-    # 第二步：合并部分和得到最终结果
-    final_result = torch.empty((1,), dtype=torch.float32, device='cuda')
-    
-    grid2 = (triton.cdiv(num_blocks, BLOCK_SIZE),)
-    reduce_final_kernel[grid2](partial_sums, final_result, num_blocks, BLOCK_SIZE)
-    
-    return final_result
+    # 第二步：直接在CPU端合并部分和（更简单可靠）
+    # 当部分和数量小于等于1024时，可以用triton合并；否则用torch.sum
+    if num_blocks <= 1024:
+        final_result = torch.empty((1,), dtype=torch.float32, device='cuda')
+        grid2 = (1,)  # 只使用1个线程来合并所有部分和
+        reduce_final_kernel[grid2](partial_sums, final_result, num_blocks, num_blocks)
+        return final_result
+    else:
+        # 使用torch.sum在GPU上合并部分和
+        return torch.sum(partial_sums)
 
 def reduce_sum_cpu(x):
     # 确保输入是numpy数组
@@ -128,7 +129,13 @@ def main():
         
         # 验证结果是否正确
         pytorch_result_np = pytorch_result.cpu().numpy()
-        triton_result_np = triton_result_tensor.cpu().numpy()[0]
+        
+        # triton_result_tensor可能是标量或包含一个元素的张量
+        triton_result_cpu = triton_result_tensor.cpu()
+        if triton_result_cpu.dim() == 0:  # 标量
+            triton_result_np = triton_result_cpu.numpy()
+        else:  # 包含一个元素的张量
+            triton_result_np = triton_result_cpu.numpy()[0]
         
         assert np.allclose(cpu_result, pytorch_result_np, rtol=1e-05, atol=1e-08), "PyTorch results do not match CPU results!"
         assert np.allclose(cpu_result, triton_result_np, rtol=1e-05, atol=1e-08), "Triton results do not match CPU results!"

@@ -78,3 +78,7 @@ The results are displayed in the console, showing:
 ### Performance Issues
 - Ensure you're running on a compatible GPU (NVIDIA GPU with compute capability >= 7.0)
 - For best performance, run on a GPU with Tensor Cores (compute capability >= 7.5)
+
+
+# Reference
+https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html

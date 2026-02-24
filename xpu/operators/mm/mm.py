@@ -24,33 +24,44 @@ def mm_kernel(
     block_start_m = pid_m * BLOCK_SIZE_M
     block_start_n = pid_n * BLOCK_SIZE_N
     
-    # 创建偏移量
-    offsets_m = block_start_m + tl.arange(0, BLOCK_SIZE_M)
-    offsets_n = block_start_n + tl.arange(0, BLOCK_SIZE_N)
-    offsets_k = tl.arange(0, BLOCK_SIZE_K)
-    
-    # 创建掩码防止越界访问
-    mask_m = offsets_m < M
-    mask_n = offsets_n < N
-    mask_k = offsets_k < K
-    
-    # 加载A矩阵的块
-    a_ptrs = a_ptr + (offsets_m[:, None] * stride_am + offsets_k[None, :] * stride_ak)
-    mask_a = mask_m[:, None] & mask_k[None, :]
-    a = tl.load(a_ptrs, mask=mask_a, other=0.0)
-    
-    # 加载B矩阵的块
-    b_ptrs = b_ptr + (offsets_k[:, None] * stride_bk + offsets_n[None, :] * stride_bn)
-    mask_b = mask_k[:, None] & mask_n[None, :]
-    b = tl.load(b_ptrs, mask=mask_b, other=0.0)
-    
     # 初始化累加器
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     
-    # 计算矩阵乘法
-    acc += tl.dot(a, b)
+    # 在K维度上分段累加
+    num_k_blocks = tl.cdiv(K, BLOCK_SIZE_K)
+    for k in range(0, num_k_blocks):
+        # 计算当前K段的起始位置
+        k_offset = k * BLOCK_SIZE_K
+        
+        # 创建偏移量
+        offsets_m = block_start_m + tl.arange(0, BLOCK_SIZE_M)
+        offsets_n = block_start_n + tl.arange(0, BLOCK_SIZE_N)
+        offsets_k = k_offset + tl.arange(0, BLOCK_SIZE_K)
+        
+        # 创建掩码防止越界访问
+        mask_m = offsets_m < M
+        mask_n = offsets_n < N
+        mask_k = offsets_k < K
+        
+        # 加载A矩阵的块 (行优先)
+        a_ptrs = a_ptr + (offsets_m[:, None] * stride_am + offsets_k[None, :] * stride_ak)
+        mask_a = mask_m[:, None] & mask_k[None, :]
+        a = tl.load(a_ptrs, mask=mask_a, other=0.0)
+        
+        # 加载B矩阵的块 (列优先)
+        b_ptrs = b_ptr + (offsets_k[:, None] * stride_bk + offsets_n[None, :] * stride_bn)
+        mask_b = mask_k[:, None] & mask_n[None, :]
+        b = tl.load(b_ptrs, mask=mask_b, other=0.0)
+        
+        # 累加到累加器 (使用更精确的矩阵乘法)
+        acc += tl.dot(a, b, allow_tf32=False)
     
     # 保存结果到C矩阵
+    offsets_m = block_start_m + tl.arange(0, BLOCK_SIZE_M)
+    offsets_n = block_start_n + tl.arange(0, BLOCK_SIZE_N)
+    mask_m = offsets_m < M
+    mask_n = offsets_n < N
+    
     c_ptrs = output_ptr + (offsets_m[:, None] * stride_cm + offsets_n[None, :] * stride_cn)
     mask_c = mask_m[:, None] & mask_n[None, :]
     tl.store(c_ptrs, acc, mask=mask_c)
